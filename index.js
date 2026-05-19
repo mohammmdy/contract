@@ -8,6 +8,10 @@ const fsN = require("fs/promises");
 const os = require("os");
 const dotenv = require("dotenv");
 
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
+
 dotenv.config();
 
 
@@ -354,49 +358,56 @@ app.post("/conServices/contractsExcelTemplate", async (req, res) => {
 app.post("/conServices/convertWordToPdf", upload.single("file"), async (req, res) => {
     const requestId = Date.now().toString();
     const requestFolder = path.join(__dirname, "uploads", requestId);
+    const inputPath = req.file?.path;
 
     try {
         if (!req.file) {
             return res.status(400).json({ error: "No file uploaded" });
         }
+
         await fsN.mkdir(requestFolder, { recursive: true });
 
-        const inputPath = req.file.path;
-        const originalName = req.file.originalname;
-        // const pdfName = path.parse(originalName).name + ".pdf";
-        const pdfName = "ContractTemplate.pdf";
-        const pdfPath = path.join(requestFolder, pdfName);
+        // Copy input file into the isolated folder (soffice outputs next to the input)
+        const inputCopy = path.join(requestFolder, req.file.originalname);
+        await fsN.copyFile(inputPath, inputCopy);
 
-        await topdf.convert(inputPath, pdfPath);
+        await execFileAsync("soffice", [
+            "--headless",
+            "--norestore",
+            "--convert-to", "pdf",
+            "--outdir", requestFolder,
+            inputCopy,
+        ], {
+            env: {
+                ...process.env,
+                HOME: "/tmp",                    // LibreOffice needs a writable home
+                TMPDIR: requestFolder,
+            },
+            timeout: 30000,
+        });
+
+        const pdfName = path.parse(req.file.originalname).name + ".pdf";
+        const pdfPath = path.join(requestFolder, pdfName);
 
         const pdfBuffer = await fsN.readFile(pdfPath);
         const base64Pdf = pdfBuffer.toString("base64");
 
-        res.on("finish", async () => {
-            try {
-                await fsN.rm(requestFolder, { recursive: true, force: true });
-                await fsN.rm(inputPath, { force: true }); 
-                console.log("Cleanup done");
-            } catch (err) {
-                console.error("Cleanup error:", err);
-            }
-        });
-
         res.json({
-            fileName: pdfName,
+            fileName: "ContractTemplate.pdf",
             mimeType: "application/pdf",
             fileData: base64Pdf,
         });
 
     } catch (err) {
-        // Clean up on error too
-    try {
-        await fsN.rm(requestFolder, { recursive: true, force: true });
-        await fsN.rm(inputPath, { force: true });
-    } catch {}
-    
-    console.error("Conversion error:", err);
-    res.status(500).json({ error: "Conversion failed" });
+        console.error("Conversion error:", err.message);
+        console.error("stderr:", err.stderr);   // <-- this will show the real LibreOffice error
+        res.status(500).json({ error: "Conversion failed", detail: err.message });
+    } finally {
+        // Always clean up, success or failure
+        try {
+            if (requestFolder) await fsN.rm(requestFolder, { recursive: true, force: true });
+            if (inputPath)     await fsN.rm(inputPath, { force: true });
+        } catch {}
     }
 });
 
