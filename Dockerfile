@@ -1,14 +1,18 @@
 FROM node:18-slim
 
 RUN apt-get update && \
-    apt-get install -y libreoffice --no-install-recommends && \
+    apt-get install -y libreoffice unoconv --no-install-recommends && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+RUN libreoffice --version
 
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
+
 RUN mkdir -p uploads
+
 EXPOSE 3000
 CMD ["node", "index.js"]
